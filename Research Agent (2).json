@@ -1,0 +1,429 @@
+{
+  "name": "Research Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "research-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b9ca8717-fb97-4576-b304-70af70b85c1a",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        304,
+        272
+      ],
+      "webhookId": "1b49aa8b-e6b5-46a2-bd5d-937297ab881d"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\n\n// Validate required fields\nif (!body.lead_id) {\n  throw new Error('lead_id is required');\n}\nif (!body.company_name && !body.company_domain) {\n  throw new Error('company_name or company_domain is required');\n}\n\nreturn [{\n  json: {\n    lead_id: body.lead_id,\n    company_name: body.company_name || '',\n    company_domain: body.company_domain || '',\n    linkedin_url: body.linkedin_url || '',\n    validated: true,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "62e70d9a-d1dd-465e-89da-057dc65f6082",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.company_domain }}",
+        "options": {
+          "redirect": {
+            "redirect": {
+              "maxRedirects": 3
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "614bce09-628a-4c58-8751-0ff192c0061f",
+      "name": "Fetch Company Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        704,
+        48
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://api.crunchbase.com/api/v4/entities/organizations",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "name",
+              "value": "={{ $json.company_name }}"
+            },
+            {
+              "name": "domain",
+              "value": "={{ $json.company_domain }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "90a41c9d-5767-49d1-9b1a-3d6344678dba",
+      "name": "Fetch Crunchbase Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        704,
+        208
+      ],
+      "disabled": true,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://newsapi.org/v2/everything",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "newsApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.company_name }}"
+            },
+            {
+              "name": "sortBy",
+              "value": "publishedAt"
+            },
+            {
+              "name": "pageSize",
+              "value": "5"
+            },
+            {
+              "name": "language",
+              "value": "en"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "cfa00943-c6a8-4cf2-b0eb-e00361741f93",
+      "name": "Fetch Recent News",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        704,
+        400
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.linkedin_url }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "86b40085-6192-46b7-9533-e8f27e1771ab",
+      "name": "Fetch LinkedIn Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        704,
+        560
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "45af0537-18f2-43d8-8d77-c3dfc982c7bd",
+      "name": "Rate Limit Delay",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        960,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst inputData = $node['Validate Input'].json;\n\nlet website_content = '';\nlet crunchbase_data = '';\nlet news_articles = [];\nlet linkedin_data = '';\n\n// Extract and validate website content\nfor (const item of items) {\n  if (item.json.data || item.json.body) {\n    const content = item.json.data || item.json.body || '';\n    if (typeof content === 'string' && content.length > 200) {\n      // Basic HTML stripping and truncation\n      website_content = content.replace(/<[^>]*>/g, ' ').substring(0, 3000);\n      break;\n    }\n  }\n}\n\n// Extract Crunchbase data\nfor (const item of items) {\n  if (item.json.entities || item.json.properties) {\n    const cbData = item.json.entities?.[0]?.properties || item.json.properties || {};\n    crunchbase_data = JSON.stringify({\n      name: cbData.name,\n      description: cbData.short_description,\n      founded_on: cbData.founded_on,\n      funding_total: cbData.funding_total,\n      employee_count: cbData.employee_count\n    });\n    break;\n  }\n}\n\n// Extract news articles\nfor (const item of items) {\n  if (item.json.articles) {\n    news_articles = item.json.articles.slice(0, 3).map(article => ({\n      title: article.title,\n      description: article.description,\n      url: article.url,\n      publishedAt: article.publishedAt,\n      source: article.source?.name\n    }));\n    break;\n  }\n}\n\n// Extract LinkedIn data\nfor (const item of items) {\n  if (item.json.body && item.json.body.includes('linkedin')) {\n    linkedin_data = 'LinkedIn profile data extracted';\n    break;\n  }\n}\n\n// Data quality assessment\nconst data_quality = {\n  has_website: website_content.length > 100,\n  has_crunchbase: crunchbase_data.length > 50,\n  has_news: news_articles.length > 0,\n  has_linkedin: linkedin_data.length > 0,\n  total_sources: (website_content.length > 100 ? 1 : 0) + \n                 (crunchbase_data.length > 50 ? 1 : 0) + \n                 (news_articles.length > 0 ? 1 : 0) + \n                 (linkedin_data.length > 0 ? 1 : 0)\n};\n\nreturn [{\n  json: {\n    lead_id: inputData.lead_id,\n    company_name: inputData.company_name,\n    company_domain: inputData.company_domain,\n    website_content,\n    crunchbase_data,\n    news_articles: JSON.stringify(news_articles),\n    linkedin_data,\n    data_quality,\n    research_timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "925b3a3e-044a-4851-8ed2-a30d810ca585",
+      "name": "Merge Research Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const researchData = $input.first().json;\n\n// Check if we have minimum data for AI processing\nif (researchData.data_quality.total_sources < 1) {\n  return [{\n    json: {\n      lead_id: researchData.lead_id,\n      company_name: researchData.company_name,\n      research_summary: \"Insufficient data available for comprehensive research. Only basic company information could be gathered.\",\n      enrichment_data: {\n        website_scraped: researchData.data_quality.has_website,\n        crunchbase_checked: researchData.data_quality.has_crunchbase,\n        news_fetched: researchData.data_quality.has_news,\n        linkedin_scraped: researchData.data_quality.has_linkedin,\n        data_quality_score: researchData.data_quality.total_sources,\n        summary: \"Limited data available\",\n        timestamp: researchData.research_timestamp,\n        status: \"partial\"\n      }\n    }\n  }];\n}\n\n// Prepare AI prompt based on available data\nlet prompt = `You are a B2B research analyst. Analyze the following data about ${researchData.company_name} and create a comprehensive brief summary (200-300 words) covering: company overview, key products/services, recent news/developments, market position, and potential pain points or opportunities for outreach.\\n\\n`;\n\nif (researchData.data_quality.has_website) {\n  prompt += `Website Content:\\n${researchData.website_content}\\n\\n`;\n}\n\nif (researchData.data_quality.has_crunchbase) {\n  prompt += `Crunchbase Data:\\n${researchData.crunchbase_data}\\n\\n`;\n}\n\nif (researchData.data_quality.has_news) {\n  prompt += `Recent News:\\n${researchData.news_articles}\\n\\n`;\n}\n\nif (researchData.data_quality.has_linkedin) {\n  prompt += `LinkedIn Data:\\n${researchData.linkedin_data}\\n\\n`;\n}\n\nprompt += `Provide a well-structured, actionable summary focusing on business intelligence and outreach opportunities.`;\n\nreturn [{\n  json: {\n    ...researchData,\n    ai_prompt: prompt,\n    ready_for_ai: researchData.data_quality.total_sources >= 1\n  }\n}];"
+      },
+      "id": "a8079e57-4fc9-4a16-8314-15742b712d60",
+      "name": "Prepare AI Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"{{ $json.ai_prompt }}\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.7,\n    \"maxOutputTokens\": 1000,\n    \"topP\": 0.8\n  },\n  \"safetySettings\": [\n    {\n      \"category\": \"HARM_CATEGORY_HARASSMENT\",\n      \"threshold\": \"BLOCK_MEDIUM_AND_ABOVE\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "24947390-f32b-4720-8833-0b4c0218b09d",
+      "name": "Gemini - Generate Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1504,
+        272
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "9uNSpttVAWNBZUs4",
+          "name": "Google Gemini(PaLM) Api account 3"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst researchData = $node['Merge Research Data'].json;\n\nlet research_summary = '';\nlet ai_success = false;\n\n// Extract AI response\nfor (const item of items) {\n  if (item.json.candidates && item.json.candidates[0]) {\n    research_summary = item.json.candidates[0].content.parts[0].text;\n    ai_success = true;\n    break;\n  }\n}\n\n// Fallback if AI fails\nif (!ai_success) {\n  research_summary = `Basic research completed for ${researchData.company_name}. `;\n  research_summary += researchData.data_quality.has_website ? 'Website data collected. ' : '';\n  research_summary += researchData.data_quality.has_crunchbase ? 'Company data available. ' : '';\n  research_summary += researchData.data_quality.has_news ? 'Recent news found. ' : '';\n  research_summary += researchData.data_quality.has_linkedin ? 'LinkedIn data gathered. ' : '';\n}\n\nconst enrichment_data = {\n  website_scraped: researchData.data_quality.has_website,\n  crunchbase_checked: researchData.data_quality.has_crunchbase,\n  news_fetched: researchData.data_quality.has_news,\n  linkedin_scraped: researchData.data_quality.has_linkedin,\n  data_quality_score: researchData.data_quality.total_sources,\n  summary: research_summary,\n  raw_data: {\n    website_preview: researchData.website_content?.substring(0, 500) || '',\n    news_count: JSON.parse(researchData.news_articles || '[]').length,\n    has_funding_data: researchData.crunchbase_data?.includes('funding') || false\n  },\n  timestamp: researchData.research_timestamp,\n  status: ai_success ? 'complete' : 'partial'\n};\n\nreturn [{\n  json: {\n    lead_id: researchData.lead_id,\n    company_name: researchData.company_name,\n    research_summary,\n    enrichment_data,\n    processing_time: new Date().toISOString(),\n    success: true\n  }\n}];"
+      },
+      "id": "e9468c98-2065-45b4-b96a-2fc25335c6e8",
+      "name": "Format Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1712,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE contacts SET enrichment_json = '{{ JSON.stringify($json.enrichment_data) }}'::jsonb, updated_at = NOW() WHERE id = (SELECT contact_id FROM leads WHERE id = '{{ $json.lead_id }}');",
+        "options": {}
+      },
+      "id": "9a965565-f5d2-4238-8259-9c746a849929",
+      "name": "Update Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1904,
+        272
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": {{ $json.success }},\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"company_name\": \"{{ $json.company_name }}\",\n  \"research_summary\": \"{{ $json.research_summary }}\",\n  \"data_quality_score\": {{ $json.enrichment_data.data_quality_score }},\n  \"sources_used\": {{ $json.enrichment_data.data_quality_score }},\n  \"processing_time\": \"{{ $json.processing_time }}\",\n  \"status\": \"{{ $json.enrichment_data.status }}\"\n}",
+        "options": {}
+      },
+      "id": "8bd09463-8b6a-468b-8283-f664828134ec",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2112,
+        272
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Fetch Company Website",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Crunchbase Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Recent News",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch LinkedIn Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Company Website": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Crunchbase Data": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Recent News": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch LinkedIn Data": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Delay": {
+      "main": [
+        [
+          {
+            "node": "Merge Research Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Research Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare AI Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare AI Analysis": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Generate Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Generate Summary": {
+      "main": [
+        [
+          {
+            "node": "Format Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Output": {
+      "main": [
+        [
+          {
+            "node": "Update Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Database": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a79e26ab-5155-4ea6-847d-e761f014b268",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4bfc8889ec2187fc37d7288e02eb69c593cee63bbdada603ab968d162b57318a"
+  },
+  "id": "EzQQY6NDcPDYpf9h",
+  "tags": []
+}

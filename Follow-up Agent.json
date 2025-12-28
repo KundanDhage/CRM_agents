@@ -1,0 +1,402 @@
+{
+  "name": "Follow-up Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "22d9784c-2694-48fd-96c3-1cea047b260b",
+      "name": "Schedule Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1056,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.*, c.name as contact_name, c.email, comp.name as company_name,\n       COALESCE((\n         SELECT timestamp FROM interactions \n         WHERE lead_id = l.id AND direction = 'outbound'\n         ORDER BY timestamp DESC LIMIT 1\n       ), l.created_at) as last_outreach,\n       (\n         SELECT COUNT(*) FROM interactions \n         WHERE lead_id = l.id AND type = 'email_reply'\n       ) as reply_count\nFROM leads l\nJOIN contacts c ON l.contact_id = c.id\nJOIN companies comp ON c.company_id = comp.id\nWHERE l.status IN ('contacted', 'in_progress')\n  AND l.assigned_to IS NOT NULL\n  AND NOT EXISTS (\n    SELECT 1 FROM agent_actions aa \n    WHERE aa.lead_id = l.id \n      AND aa.action_type = 'schedule_followup'\n      AND aa.state = 'pending'\n  )",
+        "options": {}
+      },
+      "id": "2dc7e885-2f2d-4ab8-9dbf-d457838cdff4",
+      "name": "Fetch Leads Needing Follow-up",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -848,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const leads = $input.all().map(item => item.json);\nconst now = new Date();\nconst leadsNeedingFollowup = [];\n\nfor (const lead of leads) {\n  const lastOutreach = new Date(lead.last_outreach);\n  const hoursSinceOutreach = (now - lastOutreach) / (1000 * 60 * 60);\n  \n  let needsFollowup = false;\n  let followupReason = '';\n  \n  if (lead.reply_count === 0) {\n    if (hoursSinceOutreach >= 72 && hoursSinceOutreach < 96) {\n      needsFollowup = true;\n      followupReason = 'day_3_no_response';\n    } else if (hoursSinceOutreach >= 168 && hoursSinceOutreach < 192) {\n      needsFollowup = true;\n      followupReason = 'day_7_no_response';\n    } else if (hoursSinceOutreach >= 336 && hoursSinceOutreach < 360) {\n      needsFollowup = true;\n      followupReason = 'day_14_final_attempt';\n    }\n  } else {\n    if (hoursSinceOutreach >= 120) {\n      needsFollowup = true;\n      followupReason = 'continue_conversation';\n    }\n  }\n  \n  if (needsFollowup) {\n    leadsNeedingFollowup.push({\n      ...lead,\n      hours_since_outreach: Math.round(hoursSinceOutreach),\n      followup_reason: followupReason\n    });\n  }\n}\n\nreturn leadsNeedingFollowup.map(lead => ({ json: lead }));"
+      },
+      "id": "600f6ab0-d677-4e2b-804a-9f380f791a50",
+      "name": "Filter by Cadence Rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "checkAll": "any"
+          },
+          "conditions": [
+            {
+              "id": "has-leads",
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "47d1b596-9cff-434b-bf61-9b3c409c8075",
+      "name": "Check if Leads Need Follow-up",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT * FROM interactions \nWHERE lead_id = '{{ $json.id }}'\nORDER BY timestamp DESC\nLIMIT 10",
+        "options": {}
+      },
+      "id": "9ed84c5b-cbac-4080-b0b3-bddacd432648",
+      "name": "Fetch Interaction History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -288,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "geminiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are a follow-up email specialist. Generate a follow-up email for:\\n\\nContact: {{ $json.contact_name }}\\nCompany: {{ $json.company_name }}\\nFollow-up Reason: {{ $json.followup_reason }}\\nDays Since Last Contact: {{ Math.round($json.hours_since_outreach / 24) }}\\nReply Count: {{ $json.reply_count }}\\n\\nPrevious Interaction History:\\n{{ $('Fetch Interaction History').all().map(i => `${i.json.type}: ${i.json.content?.substring(0, 100)}`).join('\\\\n') }}\\n\\nGenerate a follow-up email that:\\n1. References previous outreach naturally\\n2. Adds new value or angle\\n3. Has a clear, low-pressure CTA\\n4. Matches the follow-up stage appropriately\\n\\nFor 'day_14_final_attempt', make it a genuine final check-in.\\nFor 'continue_conversation', build on previous replies.\\n\\nProvide:\\n- Subject line\\n- Email body (150-200 words)\\n- Recommended send time (hours from now)\\n- Escalation flag (true/false) if human review needed\\n\\nFormat as JSON:\\n{\\\\\\\"subject\\\\\\\": \\\\\\\"...\\\\\\\", \\\\\\\"body\\\\\\\": \\\\\\\"...\\\\\\\", \\\\\\\"send_delay_hours\\\\\\\": 2, \\\\\\\"escalate_to_human\\\\\\\": false, \\\\\\\"reasoning\\\\\\\": \\\\\\\"...\\\\\\\"}\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.7,\n    \"maxOutputTokens\": 1000\n  },\n  \"safetySettings\": [\n    {\n      \"category\": \"HARM_CATEGORY_HARASSMENT\",\n      \"threshold\": \"BLOCK_MEDIUM_AND_ABOVE\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "3714929f-7ebb-4fff-a75a-fe83615d0a50",
+      "name": "Gemini - Generate Follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -112,
+        144
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadData = $('Filter by Cadence Rules').item.json;\nconst geminiResponse = $json.candidates && $json.candidates[0] ? $json.candidates[0].content.parts[0].text : '';\n\nlet followupData = {};\ntry {\n  const jsonMatch = geminiResponse.match(/\\{[^]*\\}/);\n  if (jsonMatch) {\n    followupData = JSON.parse(jsonMatch[0]);\n  }\n} catch (e) {\n  console.error('Error parsing Gemini response:', e);\n  followupData = {\n    subject: 'Following up',\n    body: 'Just following up on my previous message. Would love to connect when you have a moment.',\n    send_delay_hours: 24,\n    escalate_to_human: true,\n    reasoning: 'AI response parsing failed'\n  };\n}\n\nconst scheduledTime = new Date();\nscheduledTime.setHours(scheduledTime.getHours() + (followupData.send_delay_hours || 2));\n\nreturn [{\n  json: {\n    lead_id: leadData.id,\n    contact_name: leadData.contact_name,\n    contact_email: leadData.email,\n    company_name: leadData.company_name,\n    followup_reason: leadData.followup_reason,\n    subject: followupData.subject,\n    body: followupData.body,\n    scheduled_time: scheduledTime.toISOString(),\n    escalate_to_human: followupData.escalate_to_human,\n    ai_reasoning: followupData.reasoning,\n    created_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "451e9d89-7157-4927-877b-055ee1c2351b",
+      "name": "Process Follow-up Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.escalate_to_human }}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "95dc9d1f-65cc-40e9-9783-e75f92a52ecc",
+      "name": "Check if Escalation Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        256,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "agent_actions",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "agent_id": "followup_agent",
+            "lead_id": "={{ $json.lead_id }}",
+            "action_type": "schedule_followup",
+            "payload": "={{ JSON.stringify($json) }}",
+            "state": "pending_approval",
+            "created_at": "={{ $json.created_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "a89231e5-8bdf-427f-8b0a-7329beaeb003",
+      "name": "Save for Human Approval",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        464,
+        32
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_API_URL || 'http://localhost:3000' }}/api/notifications/followup-needs-approval",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"contact_name\": \"{{ $json.contact_name }}\",\n  \"reason\": \"{{ $json.followup_reason }}\",\n  \"subject\": \"{{ $json.subject }}\"\n}",
+        "options": {}
+      },
+      "id": "eee676ee-72ba-4981-b476-1dbee2e80c62",
+      "name": "Notify for Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        32
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "agent_actions",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "agent_id": "followup_agent",
+            "lead_id": "={{ $json.lead_id }}",
+            "action_type": "schedule_followup",
+            "payload": "={{ JSON.stringify($json) }}",
+            "state": "scheduled",
+            "created_at": "={{ $json.created_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "3cb4316e-97ad-40e6-a125-da56e9ccdd34",
+      "name": "Save Auto-scheduled",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        464,
+        240
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678' }}/webhook/send-email",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"to\": \"{{ $json.contact_email }}\",\n  \"subject\": \"{{ $json.subject }}\",\n  \"body\": \"{{ $json.body }}\",\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"scheduled_time\": \"{{ $json.scheduled_time }}\"\n}",
+        "options": {}
+      },
+      "id": "c44c9abc-3fc2-48ee-a556-ebcc46cce387",
+      "name": "Schedule Email Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        240
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Fetch Leads Needing Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Leads Needing Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Filter by Cadence Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter by Cadence Rules": {
+      "main": [
+        [
+          {
+            "node": "Check if Leads Need Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Leads Need Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Fetch Interaction History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Interaction History": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Generate Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Generate Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Process Follow-up Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Follow-up Data": {
+      "main": [
+        [
+          {
+            "node": "Check if Escalation Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Escalation Needed": {
+      "main": [
+        [
+          {
+            "node": "Save for Human Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save Auto-scheduled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save for Human Approval": {
+      "main": [
+        [
+          {
+            "node": "Notify for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Auto-scheduled": {
+      "main": [
+        [
+          {
+            "node": "Schedule Email Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "aadb6388-a559-4cca-bea6-f7aed2955091",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4bfc8889ec2187fc37d7288e02eb69c593cee63bbdada603ab968d162b57318a"
+  },
+  "id": "f7XnKBgcU5yFfgDO",
+  "tags": []
+}

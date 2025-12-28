@@ -1,0 +1,430 @@
+{
+  "name": "Reporting Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "65d26685-a3ba-429f-826f-3e82d1562f2a",
+      "name": "Schedule Weekly Monday 9AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -960,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  COUNT(*) as total_leads,\n  COUNT(*) FILTER (WHERE status = 'qualified') as qualified_leads,\n  COUNT(*) FILTER (WHERE status = 'contacted') as contacted_leads,\n  COUNT(*) FILTER (WHERE status = 'meeting_scheduled') as meetings_scheduled,\n  COUNT(*) FILTER (WHERE status = 'won') as won_deals,\n  AVG(priority_score) as avg_priority_score,\n  COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as new_this_week\nFROM leads\nWHERE created_at >= NOW() - INTERVAL '30 days'",
+        "options": {}
+      },
+      "id": "0852835a-f2b2-496f-a8c5-797f7e2f4a9f",
+      "name": "Fetch Lead Statistics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -704,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  type,\n  channel,\n  COUNT(*) as count,\n  COUNT(*) FILTER (WHERE direction = 'outbound') as outbound_count,\n  COUNT(*) FILTER (WHERE direction = 'inbound') as inbound_count\nFROM interactions\nWHERE timestamp >= NOW() - INTERVAL '7 days'\nGROUP BY type, channel\nORDER BY count DESC",
+        "options": {}
+      },
+      "id": "57dee3a5-a9cf-4f90-ab1f-fe397ea76386",
+      "name": "Fetch Interaction Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -704,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  agent_id,\n  action_type,\n  state,\n  COUNT(*) as action_count,\n  COUNT(*) FILTER (WHERE state = 'completed') as completed,\n  COUNT(*) FILTER (WHERE state = 'pending_approval') as pending,\n  COUNT(*) FILTER (WHERE state = 'failed') as failed\nFROM agent_actions\nWHERE created_at >= NOW() - INTERVAL '7 days'\nGROUP BY agent_id, action_type, state\nORDER BY agent_id, action_count DESC",
+        "options": {}
+      },
+      "id": "ed14d35f-343e-4cb2-a220-8794079923f8",
+      "name": "Fetch Agent Performance",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -704,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  c.name as company_name,\n  c.industry,\n  COUNT(l.id) as lead_count,\n  AVG(l.priority_score) as avg_score,\n  COUNT(*) FILTER (WHERE l.status = 'qualified') as qualified_count\nFROM companies c\nJOIN contacts cont ON c.id = cont.company_id\nJOIN leads l ON cont.id = l.contact_id\nWHERE l.created_at >= NOW() - INTERVAL '7 days'\nGROUP BY c.id, c.name, c.industry\nORDER BY lead_count DESC\nLIMIT 10",
+        "options": {}
+      },
+      "id": "484a1c04-71fd-4453-abb3-a6c7d1110d04",
+      "name": "Fetch Top Companies",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -704,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadStats = $('Fetch Lead Statistics').first().json;\nconst interactions = $('Fetch Interaction Stats').all().map(i => i.json);\nconst agentPerf = $('Fetch Agent Performance').all().map(a => a.json);\nconst topCompanies = $('Fetch Top Companies').all().map(c => c.json);\n\n// Data validation\nif (!leadStats || !interactions || !agentPerf || !topCompanies) {\n  throw new Error('Missing data from one or more data sources');\n}\n\nif (leadStats.total_leads === 0) {\n  console.warn('No leads found in reporting period - data quality alert');\n}\n\nconst conversionRate = leadStats.total_leads > 0 \n  ? ((leadStats.qualified_leads / leadStats.total_leads) * 100).toFixed(2)\n  : 0;\n\nconst meetingRate = leadStats.contacted_leads > 0\n  ? ((leadStats.meetings_scheduled / leadStats.contacted_leads) * 100).toFixed(2)\n  : 0;\n\nconst totalInteractions = interactions.reduce((sum, i) => sum + parseInt(i.count), 0);\nconst emailInteractions = interactions.filter(i => i.channel === 'email')\n  .reduce((sum, i) => sum + parseInt(i.count), 0);\n\nconst agentSummary = {};\nagentPerf.forEach(agent => {\n  if (!agentSummary[agent.agent_id]) {\n    agentSummary[agent.agent_id] = {\n      total: 0,\n      completed: 0,\n      pending: 0,\n      failed: 0\n    };\n  }\n  agentSummary[agent.agent_id].total += parseInt(agent.action_count);\n  agentSummary[agent.agent_id].completed += parseInt(agent.completed || 0);\n  agentSummary[agent.agent_id].pending += parseInt(agent.pending || 0);\n  agentSummary[agent.agent_id].failed += parseInt(agent.failed || 0);\n});\n\nObject.keys(agentSummary).forEach(agentId => {\n  const agent = agentSummary[agentId];\n  agent.success_rate = agent.total > 0 \n    ? ((agent.completed / agent.total) * 100).toFixed(2)\n    : 0;\n});\n\nreturn {\n  period: 'Last 7 days',\n  generated_at: new Date().toISOString(),\n  version: '1.1',\n  data_quality: {\n    has_leads: leadStats.total_leads > 0,\n    has_interactions: totalInteractions > 0,\n    has_agent_data: Object.keys(agentSummary).length > 0\n  },\n  lead_metrics: {\n    total_leads: parseInt(leadStats.total_leads),\n    new_this_week: parseInt(leadStats.new_this_week),\n    qualified_leads: parseInt(leadStats.qualified_leads),\n    contacted_leads: parseInt(leadStats.contacted_leads),\n    meetings_scheduled: parseInt(leadStats.meetings_scheduled),\n    won_deals: parseInt(leadStats.won_deals),\n    avg_priority_score: parseFloat(leadStats.avg_priority_score || 0).toFixed(2),\n    conversion_rate: parseFloat(conversionRate)\n  },\n  interaction_metrics: {\n    total_interactions: totalInteractions,\n    email_interactions: emailInteractions,\n    by_type: interactions\n  },\n  agent_performance: agentSummary,\n  top_companies: topCompanies,\n  meeting_conversion_rate: parseFloat(meetingRate)\n};"
+      },
+      "id": "80627d72-931c-4621-a9c8-9437a22682c5",
+      "name": "Aggregate Report Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const reportData = $('Aggregate Report Data').first().json;\n\n// Track agent execution for observability\nconst agentAction = {\n  agent_id: 'reporting_agent',\n  action_type: 'generate_report',\n  state: 'completed',\n  created_at: new Date().toISOString(),\n  meta: {\n    data_quality: reportData.data_quality,\n    report_version: reportData.version\n  }\n};\n\nreturn {\n  ...reportData,\n  agent_action: agentAction\n};"
+      },
+      "id": "06a855c1-26d6-42cb-9568-e8705e76e2ac",
+      "name": "Track Agent Execution",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are a sales analytics expert. Generate a comprehensive weekly report based on this data:\\n\\n{{ JSON.stringify($json, null, 2) }}\\n\\nCreate a report with:\\n\\n1. Executive Summary (2-3 sentences highlighting key metrics and trends)\\n2. Lead Performance Analysis\\n   - Total leads and conversion rates\\n   - Quality indicators and priority scores\\n   - Week-over-week trends and anomalies\\n3. Interaction Analysis\\n   - Volume and channel breakdown\\n   - Engagement patterns and effectiveness\\n4. Agent Performance Review\\n   - Success rates by agent\\n   - Areas of excellence and improvement opportunities\\n   - Task completion rates and bottlenecks\\n5. Top Companies & Opportunities\\n   - Most engaged companies\\n   - Industry insights\\n6. Key Insights & Recommendations (3-5 actionable items)\\n7. Red Flags or Concerns (data quality issues, performance drops)\\n\\nAdditional Context:\\n- Focus on trends vs previous periods where possible\\n- Highlight anomalies or significant changes  \\n- Provide specific, actionable recommendations\\n- Include agent performance improvements needed\\n- Note any data quality issues\\n\\nFormat professionally with clear sections. Keep it concise but insightful.\\n\\nProvide the report as a formatted text suitable for email.\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.5,\n    \"maxOutputTokens\": 2000\n  }\n}",
+        "options": {}
+      },
+      "id": "c705789f-3585-41f1-932a-7d0fcc3c4d4a",
+      "name": "Gemini - Generate Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -192,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const reportData = $('Track Agent Execution').first().json;\nconst geminiResponse = $json.candidates[0].content.parts[0].text;\n\nconst now = new Date();\nconst weekStart = new Date(now);\nweekStart.setDate(now.getDate() - 7);\n\n// Dynamic recipients based on environment or data\nconst defaultRecipients = ['sales-team@company.com', 'management@company.com'];\nconst recipients = defaultRecipients; // Can be enhanced with env variables\n\nreturn {\n  report_type: 'weekly_sales_analytics',\n  version: '1.1',\n  period_start: weekStart.toISOString(),\n  period_end: now.toISOString(),\n  generated_at: now.toISOString(),\n  report_content: geminiResponse,\n  raw_data: reportData,\n  recipients: recipients,\n  org_id: \"={{ $env.ORGANIZATION_ID || 'default' }}\"\n};"
+      },
+      "id": "1559dc85-92d8-45a8-83b8-40f551d236bf",
+      "name": "Format Final Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "reports",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "report_type": "={{ $json.report_type }}",
+            "version": "={{ $json.version }}",
+            "period_start": "={{ $json.period_start }}",
+            "period_end": "={{ $json.period_end }}",
+            "content": "={{ $json.report_content }}",
+            "data": "={{ JSON.stringify($json.raw_data) }}",
+            "created_at": "={{ $json.generated_at }}",
+            "org_id": "={{ $json.org_id }}",
+            "status": "completed",
+            "recipients": "={{ JSON.stringify($json.recipients) }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "53b123ef-9a18-4f1e-b7ed-9dc9c1256966",
+      "name": "Save Report to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        176,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "agent_actions",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "agent_id": "={{ $json.raw_data.agent_action.agent_id }}",
+            "action_type": "={{ $json.raw_data.agent_action.action_type }}",
+            "state": "={{ $json.raw_data.agent_action.state }}",
+            "created_at": "={{ $json.raw_data.agent_action.created_at }}",
+            "meta": "={{ JSON.stringify($json.raw_data.agent_action.meta) }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "ce808187-0c7c-4cc9-82fa-14dd9eb2d2b8",
+      "name": "Log Agent Action",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        176,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "reports@company.com",
+        "toEmail": "={{ $json.recipients.join(',') }}",
+        "subject": "=Weekly Sales Analytics Report - {{ new Date($json.period_end).toLocaleDateString() }}",
+        "options": {}
+      },
+      "id": "1ffb8ebc-1ef8-45d8-87ba-1ab7c3304835",
+      "name": "Send Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        176,
+        208
+      ],
+      "webhookId": "1f6c8994-756e-40ef-ad50-d287446ead24"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_API_URL }}/api/reports/webhook",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"report_id\": \"{{ $json.report_id }}\",\n  \"report_type\": \"{{ $json.report_type }}\",\n  \"version\": \"{{ $json.version }}\",\n  \"period_start\": \"{{ $json.period_start }}\",\n  \"period_end\": \"{{ $json.period_end }}\",\n  \"status\": \"sent\",\n  \"org_id\": \"{{ $json.org_id }}\",\n  \"recipients\": {{ JSON.stringify($json.recipients) }}\n}",
+        "options": {}
+      },
+      "id": "b7b2476b-b0e1-42f3-bab4-815b81944b32",
+      "name": "Notify Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        384,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Weekly Monday 9AM": {
+      "main": [
+        [
+          {
+            "node": "Fetch Lead Statistics",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Interaction Stats",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Agent Performance",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Top Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Lead Statistics": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Interaction Stats": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Agent Performance": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Top Companies": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Report Data": {
+      "main": [
+        [
+          {
+            "node": "Track Agent Execution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Track Agent Execution": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Generate Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Generate Report": {
+      "main": [
+        [
+          {
+            "node": "Format Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Final Report": {
+      "main": [
+        [
+          {
+            "node": "Save Report to DB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log Agent Action",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Report to DB": {
+      "main": [
+        [
+          {
+            "node": "Notify Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Agent Action": {
+      "main": [
+        [
+          {
+            "node": "Notify Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email Report": {
+      "main": [
+        [
+          {
+            "node": "Notify Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "3095a6aa-3793-4ac0-8249-810a0c5ee42f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4bfc8889ec2187fc37d7288e02eb69c593cee63bbdada603ab968d162b57318a"
+  },
+  "id": "ynhOcgb4ce3njYlb",
+  "tags": []
+}

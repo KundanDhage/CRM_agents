@@ -1,0 +1,353 @@
+{
+  "name": "Content Personalization Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "personalization-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "ee5f907b-31d2-4dcb-bbfd-2b58ab034e70",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1024,
+        160
+      ],
+      "webhookId": "personalization-webhook"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "lead_id",
+              "name": "lead_id",
+              "value": "={{ $json.body.lead_id }}",
+              "type": "string"
+            },
+            {
+              "id": "contact_name",
+              "name": "contact_name",
+              "value": "={{ $json.body.contact_name }}",
+              "type": "string"
+            },
+            {
+              "id": "company_name",
+              "name": "company_name",
+              "value": "={{ $json.body.company_name }}",
+              "type": "string"
+            },
+            {
+              "id": "industry",
+              "name": "industry",
+              "value": "={{ $json.body.industry }}",
+              "type": "string"
+            },
+            {
+              "id": "job_title",
+              "name": "job_title",
+              "value": "={{ $json.body.job_title }}",
+              "type": "string"
+            },
+            {
+              "id": "pain_points",
+              "name": "pain_points",
+              "value": "={{ $json.body.pain_points || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "message_type",
+              "name": "message_type",
+              "value": "={{ $json.body.message_type || 'outreach' }}",
+              "type": "string"
+            },
+            {
+              "id": "org_id",
+              "name": "org_id",
+              "value": "={{ $json.body.org_id || $env.ORGANIZATION_ID || 'default' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e4557b2e-0b9c-408f-bfd6-9c61f16c3305",
+      "name": "Extract Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -832,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"models/embedding-001\",\n  \"content\": {\n    \"parts\": [{\n      \"text\": \"Industry: {{ $json.industry }}, Job Title: {{ $json.job_title }}, Pain Points: {{ $json.pain_points }}\"\n    }]\n  }\n}",
+        "options": {}
+      },
+      "id": "1a6f7ecc-ad26-4761-adcc-0bf36c9f55ea",
+      "name": "Generate Query Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -624,
+        160
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DC5kST1lpGkTCgFC",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "{{ $env.VECTOR_DB_URL }}/query",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"vector\": {{ JSON.stringify($json.embedding.values) }},\n  \"top_k\": 5,\n  \"namespace\": \"company_knowledge\",\n  \"include_metadata\": true,\n  \"filter\": {\n    \"industry\": \"{{ $('Extract Input').item.json.industry }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "4ae4fe7d-ad29-461e-8898-64f2b79203da",
+      "name": "Query Vector DB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -432,
+        160
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DC5kST1lpGkTCgFC",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $('Extract Input').first().json;\nconst vectorResults = $json.matches || [];\n\n// Check if we have relevant context\nif (vectorResults.length === 0) {\n  console.warn('No relevant context found in vector DB for industry:', inputData.industry);\n  \n  // Fallback to general industry personalization\n  return {\n    lead_id: inputData.lead_id,\n    org_id: inputData.org_id,\n    contact_name: inputData.contact_name,\n    company_name: inputData.company_name,\n    industry: inputData.industry,\n    job_title: inputData.job_title,\n    pain_points: inputData.pain_points,\n    message_type: inputData.message_type,\n    relevant_context: `No specific company knowledge found. Using general ${inputData.industry} industry insights and best practices.`,\n    context_sources: ['industry_knowledge_base'],\n    context_count: 0,\n    is_fallback: true,\n    context_quality: {\n      average_score: 0,\n      has_high_quality: false,\n      sufficient_context: false,\n      is_fallback_used: true\n    }\n  };\n}\n\nconst relevantContext = vectorResults.map(match => ({\n  content: match.metadata.content,\n  source: match.metadata.source,\n  score: match.score,\n  category: match.metadata.category\n}));\n\nrelevantContext.sort((a, b) => b.score - a.score);\n\nconst topContext = relevantContext.slice(0, 3);\nconst averageScore = topContext.length > 0 \n  ? topContext.reduce((sum, ctx) => sum + ctx.score, 0) / topContext.length \n  : 0;\n\nconst contextText = topContext.map((ctx, idx) => \n  `[Context ${idx + 1}] (${ctx.category}):\\n${ctx.content}\\nSource: ${ctx.source}`\n).join('\\n\\n');\n\nreturn {\n  lead_id: inputData.lead_id,\n  org_id: inputData.org_id,\n  contact_name: inputData.contact_name,\n  company_name: inputData.company_name,\n  industry: inputData.industry,\n  job_title: inputData.job_title,\n  pain_points: inputData.pain_points,\n  message_type: inputData.message_type,\n  relevant_context: contextText,\n  context_sources: topContext.map(c => c.source),\n  context_count: topContext.length,\n  is_fallback: false,\n  context_quality: {\n    average_score: averageScore,\n    has_high_quality: averageScore > 0.7,\n    sufficient_context: topContext.length >= 2,\n    is_fallback_used: false\n  }\n};"
+      },
+      "id": "87101513-73a7-4a2b-9f52-2db544bdca37",
+      "name": "Process RAG Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are an expert at hyper-personalized B2B messaging. Create a deeply personalized message using the context from our knowledge base.\\n\\n=== RECIPIENT INFO ===\\nContact: {{ $json.contact_name }}\\nJob Title: {{ $json.job_title }}\\nCompany: {{ $json.company_name }}\\nIndustry: {{ $json.industry }}\\nKnown Pain Points: {{ $json.pain_points }}\\n\\n=== RELEVANT COMPANY KNOWLEDGE (from RAG) ===\\n{{ $json.relevant_context }}\\n\\n=== TASK ===\\nCreate a {{ $json.message_type }} message that:\\n1. Uses specific details from the knowledge base context\\n2. Addresses their likely pain points based on industry/role\\n3. References relevant case studies, features, or solutions from our knowledge base\\n4. Feels genuinely personalized, not templated\\n5. Includes specific value propositions relevant to their situation\\n6. Has a clear, contextual call-to-action\\n\\nProvide:\\n- Subject line (if email)\\n- Message body (200-250 words)\\n- Personalization elements used (for transparency)\\n- Confidence score (0-100) for personalization quality\\n\\nFormat as JSON:\\n{\\n  \\\"subject\\\": \\\"...\\\",\\n  \\\"body\\\": \\\"...\\\",\\n  \\\"personalization_elements\\\": [\\\"...\\\"],\\n  \\\"sources_used\\\": [\\\"...\\\"],\\n  \\\"confidence_score\\\": 85,\\n  \\\"reasoning\\\": \\\"...\\\"\\n}\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.8,\n    \"maxOutputTokens\": 1500\n  }\n}",
+        "options": {}
+      },
+      "id": "3f4bbf7c-7345-4974-b7f8-948c90a3c5c3",
+      "name": "Gemini - RAG Personalization",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -32,
+        160
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DC5kST1lpGkTCgFC",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $('Process RAG Context').first().json;\nconst geminiResponse = $json.candidates[0].content.parts[0].text;\n\nlet personalizedContent = {};\ntry {\n  const jsonMatch = geminiResponse.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    personalizedContent = JSON.parse(jsonMatch[0]);\n  }\n} catch (e) {\n  console.error('Error parsing personalized content:', e);\n  personalizedContent = {\n    subject: 'Following up on your needs',\n    body: 'Error generating personalized content',\n    personalization_elements: [],\n    sources_used: [],\n    confidence_score: 0,\n    reasoning: 'Parse error'\n  };\n}\n\n// Quality metrics\nconst hasPersonalization = personalizedContent.personalization_elements.length > 0;\nconst hasSources = personalizedContent.sources_used.length > 0;\nconst isHighConfidence = personalizedContent.confidence_score > 70;\n\nreturn {\n  lead_id: inputData.lead_id,\n  org_id: inputData.org_id,\n  contact_name: inputData.contact_name,\n  company_name: inputData.company_name,\n  subject: personalizedContent.subject,\n  body: personalizedContent.body,\n  personalization_elements: personalizedContent.personalization_elements,\n  knowledge_sources: inputData.context_sources,\n  rag_sources_used: personalizedContent.sources_used,\n  confidence_score: personalizedContent.confidence_score,\n  reasoning: personalizedContent.reasoning,\n  context_count: inputData.context_count,\n  is_fallback: inputData.is_fallback,\n  generated_at: new Date().toISOString(),\n  quality_metrics: {\n    has_personalization: hasPersonalization,\n    has_sources: hasSources,\n    is_high_confidence: isHighConfidence,\n    meets_quality_standards: hasPersonalization && hasSources && isHighConfidence,\n    context_quality: inputData.context_quality\n  }\n};"
+      },
+      "id": "a2a4b872-f18d-4dd3-898f-7213a6d52fcc",
+      "name": "Format Personalized Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "schema": "public",
+        "table": "agent_actions",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "agent_id": "personalization_agent",
+            "org_id": "{{ $json.org_id }}",
+            "lead_id": "{{ $json.lead_id }}",
+            "action_type": "rag_personalization",
+            "payload": "{{ JSON.stringify($json) }}",
+            "state": "completed",
+            "created_at": "{{ $json.generated_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "c1d0f490-1b2e-489b-88a2-33031b8af1b5",
+      "name": "Log Personalization",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        384,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"success\": true,\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"org_id\": \"{{ $json.org_id }}\",\n  \"subject\": \"{{ $json.subject }}\",\n  \"body\": \"{{ $json.body }}\",\n  \"personalization_elements\": {{ JSON.stringify($json.personalization_elements) }},\n  \"knowledge_sources\": {{ JSON.stringify($json.knowledge_sources) }},\n  \"confidence_score\": {{ $json.confidence_score }},\n  \"context_count\": {{ $json.context_count }},\n  \"is_fallback\": {{ $json.is_fallback }},\n  \"quality_metrics\": {{ JSON.stringify($json.quality_metrics) }}\n}",
+        "options": {}
+      },
+      "id": "00a3a341-caeb-480f-9646-f23613906955",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        576,
+        160
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Input": {
+      "main": [
+        [
+          {
+            "node": "Generate Query Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "Query Vector DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Vector DB": {
+      "main": [
+        [
+          {
+            "node": "Process RAG Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process RAG Context": {
+      "main": [
+        [
+          {
+            "node": "Gemini - RAG Personalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - RAG Personalization": {
+      "main": [
+        [
+          {
+            "node": "Format Personalized Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Personalized Output": {
+      "main": [
+        [
+          {
+            "node": "Log Personalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Personalization": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f70282c6-2e4b-4bbd-b9a7-7f934fbf1daa",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4bfc8889ec2187fc37d7288e02eb69c593cee63bbdada603ab968d162b57318a"
+  },
+  "id": "E3vU2h5s58groscc",
+  "tags": []
+}

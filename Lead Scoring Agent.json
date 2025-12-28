@@ -1,0 +1,311 @@
+{
+  "name": "Lead Scoring Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "scoring-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "31d52b4a-80df-4fed-9ef9-22f66ab81c2e",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -48,
+        48
+      ],
+      "webhookId": "f3916090-54f4-4873-a9d1-963b3be395d2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\n\n// Validate required fields\nif (!body.lead_id) throw new Error('lead_id is required');\nif (!body.contact_id) throw new Error('contact_id is required');\n\nreturn [{\n  json: {\n    lead_id: body.lead_id,\n    contact_id: body.contact_id,\n    validated: true,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "0408819f-37c5-4f0e-955c-c2285cf37135",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT * FROM contacts WHERE id = '{{ $json.contact_id }}'",
+        "options": {}
+      },
+      "id": "f98009e5-f8c1-46df-a889-08e713793f23",
+      "name": "Fetch Contact Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        352,
+        -48
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT * FROM companies WHERE id = (SELECT company_id FROM contacts WHERE id = '{{ $node[\"Validate Input\"].json.contact_id }}')",
+        "options": {}
+      },
+      "id": "2146ed87-5c3e-4cfd-8bc3-4255f8abc1a9",
+      "name": "Fetch Company Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        560,
+        48
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT * FROM interactions WHERE lead_id = '{{ $node[\"Validate Input\"].json.lead_id }}' ORDER BY timestamp DESC LIMIT 20",
+        "options": {}
+      },
+      "id": "58dd59ec-5561-413e-abf5-33ac83224051",
+      "name": "Fetch Interactions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        560,
+        208
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nlet contact = {};\nlet company = {};\nlet interactions = [];\nlet lead_id = '';\n\n// Get input data\nconst inputNode = $node[\"Validate Input\"].json;\nlead_id = inputNode.lead_id;\n\n// Find contact data\nfor (const item of items) {\n  if (item.json.email && item.json.name && !item.json.domain) {\n    contact = item.json;\n    break;\n  }\n}\n\n// Find company data\nfor (const item of items) {\n  if (item.json.domain || (item.json.name && item.json.industry)) {\n    company = item.json;\n    break;\n  }\n}\n\n// Find interactions\nfor (const item of items) {\n  if (item.json.type && item.json.timestamp) {\n    interactions.push(item.json);\n  }\n}\n\n// Fallback if no contact data\nif (!contact.id) {\n  return [{\n    json: {\n      lead_id,\n      contact_id: inputNode.contact_id,\n      scores: { \n        demographic_score: 5, \n        firmographic_score: 5, \n        engagement_score: 0, \n        timing_score: 10 \n      },\n      total_score: 20,\n      interaction_count: 0,\n      scoring_data: { \n        job_title: 'Unknown', \n        company_size: 0, \n        industry: 'Unknown', \n        recent_interactions: [] \n      },\n      data_quality: 'poor'\n    }\n  }];\n}\n\n// Calculate base scores\nlet scores = {\n  demographic_score: 0,\n  firmographic_score: 0,\n  engagement_score: 0,\n  timing_score: 0\n};\n\n// Demographic scoring (job title, seniority)\nconst jobTitle = (contact.job_title || '').toLowerCase();\nif (jobTitle.includes('ceo') || jobTitle.includes('founder') || jobTitle.includes('president')) {\n  scores.demographic_score = 30;\n} else if (jobTitle.includes('vp') || jobTitle.includes('vice president') || jobTitle.includes('director') || jobTitle.includes('head')) {\n  scores.demographic_score = 25;\n} else if (jobTitle.includes('manager') || jobTitle.includes('lead')) {\n  scores.demographic_score = 15;\n} else {\n  scores.demographic_score = 5;\n}\n\n// Firmographic scoring (company size, industry)\nconst companySize = parseInt(company.size) || 0;\nif (companySize >= 1000) {\n  scores.firmographic_score = 25;\n} else if (companySize >= 200) {\n  scores.firmographic_score = 20;\n} else if (companySize >= 50) {\n  scores.firmographic_score = 15;\n} else if (companySize >= 10) {\n  scores.firmographic_score = 10;\n} else {\n  scores.firmographic_score = 5;\n}\n\n// Industry fit\nconst targetIndustries = ['technology', 'saas', 'software', 'fintech', 'finance'];\nconst companyIndustry = (company.industry || '').toLowerCase();\nif (targetIndustries.some(ind => companyIndustry.includes(ind))) {\n  scores.firmographic_score += 20;\n} else {\n  scores.firmographic_score += 5;\n}\n\n// Enrichment quality bonus\nif (company.enrichment_json && typeof company.enrichment_json === 'object' && Object.keys(company.enrichment_json).length > 0) {\n  scores.firmographic_score += 10;\n}\n\n// Engagement scoring\nconst emailOpens = interactions.filter(i => i.type === 'email_open').length;\nconst emailClicks = interactions.filter(i => i.type === 'email_click').length;\nconst emailReplies = interactions.filter(i => i.type === 'email_reply').length;\nconst websiteVisits = interactions.filter(i => i.type === 'website_visit').length;\n\nscores.engagement_score = (emailOpens * 2) + (emailClicks * 5) + (emailReplies * 15) + (websiteVisits * 3);\nscores.engagement_score = Math.min(scores.engagement_score, 40); // Cap at 40\n\n// Timing/Recency scoring\nif (interactions.length > 0) {\n  const lastInteraction = new Date(interactions[0].timestamp);\n  const hoursSinceInteraction = (Date.now() - lastInteraction.getTime()) / (1000 * 60 * 60);\n  \n  if (hoursSinceInteraction < 24) {\n    scores.timing_score = 15;\n  } else if (hoursSinceInteraction < 72) {\n    scores.timing_score = 10;\n  } else if (hoursSinceInteraction < 168) {\n    scores.timing_score = 5;\n  } else {\n    scores.timing_score = 2;\n  }\n} else {\n  scores.timing_score = 10; // New lead bonus\n}\n\n// Calculate total\nconst total_score = scores.demographic_score + scores.firmographic_score + \n                    scores.engagement_score + scores.timing_score;\n\nreturn [{\n  json: {\n    lead_id,\n    contact_id: contact.id,\n    contact_name: contact.name,\n    company_name: company.name,\n    scores: scores,\n    total_score: Math.min(total_score, 100),\n    interaction_count: interactions.length,\n    scoring_data: {\n      job_title: contact.job_title,\n      company_size: companySize,\n      industry: company.industry,\n      recent_interactions: interactions.slice(0, 5).map(i => ({\n        type: i.type,\n        timestamp: i.timestamp\n      }))\n    },\n    data_quality: company.enrichment_json ? 'good' : 'basic'\n  }\n}];"
+      },
+      "id": "965b6a5e-b7f9-4852-9a17-f21e1fef5f44",
+      "name": "Calculate Base Scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "geminiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are a B2B lead scoring expert. Analyze this lead and provide qualitative insights:\\n\\nContact: {{ $json.contact_name }}\\nJob Title: {{ $json.scoring_data.job_title }}\\nCompany: {{ $json.company_name }}\\nIndustry: {{ $json.scoring_data.industry }}\\nCompany Size: {{ $json.scoring_data.company_size }} employees\\nInteraction Count: {{ $json.interaction_count }}\\nBase Score: {{ $json.total_score }}/100\\n\\nScore Breakdown:\\n- Demographic: {{ $json.scores.demographic_score }}\\n- Firmographic: {{ $json.scores.firmographic_score }}\\n- Engagement: {{ $json.scores.engagement_score }}\\n- Timing: {{ $json.scores.timing_score }}\\n\\nProvide:\\n1. Score adjustment recommendation (-10 to +10 points) with reasoning\\n2. Priority level (Hot/Warm/Cold)\\n3. Key selling points based on profile\\n4. Recommended next action\\n5. Potential objections to anticipate\\n\\nFormat as JSON:\\n{\\\"score_adjustment\\\": 5, \\\"reasoning\\\": \\\"...\\\", \\\"priority_level\\\": \\\"Hot\\\", \\\"selling_points\\\": [\\\"...\\\"], \\\"next_action\\\": \\\"...\\\", \\\"potential_objections\\\": [\\\"...\\\"]}\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.5,\n    \"maxOutputTokens\": 800\n  },\n  \"safetySettings\": [\n    {\n      \"category\": \"HARM_CATEGORY_HARASSMENT\",\n      \"threshold\": \"BLOCK_MEDIUM_AND_ABOVE\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "463802e8-553d-4d7c-b972-a2c158a204f0",
+      "name": "Gemini - AI Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        960,
+        112
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nlet baseData = {};\nlet aiAnalysis = {};\n\n// Get base scoring data\nfor (const item of items) {\n  if (item.json.total_score !== undefined) {\n    baseData = item.json;\n    break;\n  }\n}\n\n// Get Gemini response\nfor (const item of items) {\n  if (item.json.candidates && item.json.candidates[0]) {\n    const geminiResponse = item.json.candidates[0].content.parts[0].text;\n    try {\n      const jsonMatch = geminiResponse.match(/\\{[^]*\\}/);\n      if (jsonMatch) {\n        aiAnalysis = JSON.parse(jsonMatch[0]);\n      }\n    } catch (e) {\n      console.error('Error parsing Gemini response:', e);\n      aiAnalysis = {\n        score_adjustment: 0,\n        reasoning: 'Unable to parse AI analysis',\n        priority_level: 'Warm',\n        selling_points: [],\n        next_action: 'Manual review recommended',\n        potential_objections: []\n      };\n    }\n    break;\n  }\n}\n\n// Fallback if no AI response\nif (Object.keys(aiAnalysis).length === 0) {\n  aiAnalysis = {\n    score_adjustment: 0,\n    reasoning: 'AI analysis unavailable',\n    priority_level: baseData.total_score >= 70 ? 'Hot' : baseData.total_score >= 40 ? 'Warm' : 'Cold',\n    selling_points: ['Standard B2B outreach'],\n    next_action: 'Continue standard follow-up',\n    potential_objections: ['Timing', 'Budget', 'Current solution']\n  };\n}\n\n// Apply adjustment\nconst adjusted_score = Math.max(0, Math.min(100, \n  baseData.total_score + (aiAnalysis.score_adjustment || 0)\n));\n\nreturn [{\n  json: {\n    lead_id: baseData.lead_id,\n    contact_id: baseData.contact_id,\n    priority_score: adjusted_score,\n    priority_level: aiAnalysis.priority_level || 'Warm',\n    base_score: baseData.total_score,\n    ai_adjustment: aiAnalysis.score_adjustment || 0,\n    ai_reasoning: aiAnalysis.reasoning || '',\n    selling_points: aiAnalysis.selling_points || [],\n    next_action: aiAnalysis.next_action || '',\n    potential_objections: aiAnalysis.potential_objections || [],\n    score_breakdown: baseData.scores,\n    data_quality: baseData.data_quality || 'basic',\n    scored_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "b604926b-cb86-457b-80ce-346402704140",
+      "name": "Finalize Score with AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1152,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE leads SET \n  priority_score = {{ $json.priority_score }},\n  priority_level = '{{ $json.priority_level }}',\n  updated_at = NOW()\nWHERE id = '{{ $json.lead_id }}';",
+        "options": {}
+      },
+      "id": "0bcba77b-4e01-4666-8648-530f9c09eada",
+      "name": "Update Lead Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1360,
+        112
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO agent_actions (agent_id, lead_id, action_type, payload, state, created_at)\nVALUES (\n  'scoring_agent',\n  '{{ $json.lead_id }}',\n  'score_lead',\n  '{{ JSON.stringify($json) }}'::jsonb,\n  'completed',\n  '{{ $json.scored_at }}'\n);",
+        "options": {}
+      },
+      "id": "7ea51b8c-49c9-4b75-b049-b21f48134e21",
+      "name": "Log Agent Action",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1360,
+        256
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"lead_id\": \"{{ $json.lead_id }}\",\n  \"priority_score\": {{ $json.priority_score }},\n  \"priority_level\": \"{{ $json.priority_level }}\",\n  \"base_score\": {{ $json.base_score }},\n  \"ai_adjustment\": {{ $json.ai_adjustment }},\n  \"ai_reasoning\": \"{{ $json.ai_reasoning }}\",\n  \"next_action\": \"{{ $json.next_action }}\",\n  \"selling_points\": {{ JSON.stringify($json.selling_points) }},\n  \"data_quality\": \"{{ $json.data_quality }}\",\n  \"scored_at\": \"{{ $json.scored_at }}\"\n}",
+        "options": {}
+      },
+      "id": "984a6d05-9f96-46d6-8b5f-0fa2c783becc",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1552,
+        112
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Fetch Contact Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Interactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Contact Data": {
+      "main": [
+        [
+          {
+            "node": "Fetch Company Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Company Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Base Scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Interactions": {
+      "main": [
+        [
+          {
+            "node": "Calculate Base Scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Base Scores": {
+      "main": [
+        [
+          {
+            "node": "Gemini - AI Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - AI Analysis": {
+      "main": [
+        [
+          {
+            "node": "Finalize Score with AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Score with AI": {
+      "main": [
+        [
+          {
+            "node": "Update Lead Score",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log Agent Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead Score": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "b6216cc3-86ac-4464-be5d-fd12500d81a0",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4bfc8889ec2187fc37d7288e02eb69c593cee63bbdada603ab968d162b57318a"
+  },
+  "id": "Z2VaHYszMmhacjvT",
+  "tags": []
+}
